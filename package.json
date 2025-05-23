@@ -1,7 +1,7 @@
 {
   "name": "claude-fsd",
-  "version": "1.1.5",
-  "description": "Claude Full Stack Development tools for managing development projects",
+  "version": "1.1.5.1",
+  "description": "Claude Full Stack Development - AI-powered development team using Claude Code with ultrathink",
   "bin": {
     "claude-fsd": "./bin/claude-fsd",
     "claudefsd": "./bin/claudefsd",
@@ -23,7 +23,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/claude-fsd.git"
+    "url": "https://github.com/mkamrans/claude-fsd.git"
   },
   "engines": {
     "node": ">=14.0.0"

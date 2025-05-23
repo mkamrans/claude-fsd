@@ -54,7 +54,7 @@ Runs the development agent fleet. This command:
 - Tests and commits the changes if everything looks good
 - Repeats until all tasks are done
 
-Every 4th cycle, it activates "megathinking mode" for architectural planning.
+Every 4th cycle, it activates "megathinking mode" for architectural planning. Code review uses ultrathink for thorough analysis.
 
 #### claudefsd-plan
 Interactive planning session where you work with AI to:
@@ -64,7 +64,7 @@ Interactive planning session where you work with AI to:
 - Update the project roadmap
 
 #### claudefsd-plan-gen
-Generates an initial project plan from scratch based on:
+Generates an initial project plan from scratch using Claude Code's ultrathink for comprehensive analysis based on:
 - Your project requirements (`docs/REQUIREMENTS.md`)
 - Any existing code or documentation
 - Best practices for your tech stack
@@ -86,9 +86,9 @@ Plan → Develop → Review → Test → Commit → Repeat
 ### Required
 - Node.js >= 14.0.0
 - Unix-like environment (macOS, Linux)
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude` command)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` command)
 
-All AI processing is handled by Claude Code with built-in ultrathink capabilities.
+All AI processing is handled by Claude Code with built-in ultrathink capabilities for advanced reasoning tasks.
 
 ## Project Structure
 
