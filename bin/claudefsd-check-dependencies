@@ -13,7 +13,7 @@ command_exists() {
 
 # Function to check dependencies
 check_dependencies() {
-    local check_codex=${1:-true}  # Check codex by default
+    local check_claude=${1:-true}  # Check claude by default
     local missing_deps=()
     local warnings=()
     

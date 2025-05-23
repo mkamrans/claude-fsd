@@ -13,7 +13,7 @@ while true; do
     LOOP_COUNTER=$((LOOP_COUNTER + 1))
     
     mkdir -p logs
-    # Use a temporary directory for tmp files, as codex is sandboxed to this directory
+    # Use a temporary directory for tmp files, as claude is sandboxed to this directory
     mkdir -p tmp
     export TMPDIR=tmp/
     LOGFILE="logs/claude-$(date +%Y%m%d_%H%M%S).txt"
