@@ -56,7 +56,9 @@ echo "Running claude..."
 claude --dangerously-skip-permissions -p "$prompt2" | tee >(cat > $LOGFILE-ba3-$round)
 
 echo "Running claude with ultrathink (results won't display)..."
-claude --dangerously-skip-permissions --ultrathink -p "$prompt2" > $LOGFILE-ba4-$round
+claude --dangerously-skip-permissions -p "Make sure you ultrathink about this
+
+$prompt2" > $LOGFILE-ba4-$round
 
 echo -e "\033[32m==================================================================\033[0m"
 echo -e "\033[32m== DONE\033[0m"

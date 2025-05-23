@@ -145,7 +145,8 @@ Do not include any additional commentary or explanations outside of these tagged
 
     # run the static code reviewer using Claude Code with ultrathink (replaces codex o3)
     # run it in the background because it's thorough
-    (claude --dangerously-skip-permissions --ultrathink -p "
+    (claude --dangerously-skip-permissions -p "Make sure you ultrathink about this
+
 You are the team's static code reviewer.
 A developer has completed this task: $nexttask
 The developer's notes are at $LOGFILE-developer .
