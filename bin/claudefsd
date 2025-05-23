@@ -9,7 +9,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Source the dependency checker
-source "$(dirname "$0")/claudefsd-check-dependencies"
+source cclaudefsd-check-dependencies
 
 # Function to display the menu
 show_menu() {
@@ -40,17 +40,17 @@ if [ $# -eq 0 ]; then
         1)
             echo -e "${GREEN}Starting development mode...${NC}"
             echo
-            exec "$(dirname "$0")/claudefsd-dev"
+            exec cclaudefsd-dev
             ;;
         2)
             echo -e "${GREEN}Starting planning mode...${NC}"
             echo
-            exec "$(dirname "$0")/claudefsd-plan"
+            exec cclaudefsd-plan
             ;;
         3)
             echo -e "${GREEN}Starting plan generation...${NC}"
             echo
-            exec "$(dirname "$0")/claudefsd-plan-gen"
+            exec cclaudefsd-plan-gen
             ;;
         4)
             echo "Goodbye!"
@@ -66,15 +66,15 @@ else
     case "$1" in
         dev)
             shift
-            exec "$(dirname "$0")/claudefsd-dev" "$@"
+            exec cclaudefsd-dev "$@"
             ;;
         plan)
             shift
-            exec "$(dirname "$0")/claudefsd-plan" "$@"
+            exec cclaudefsd-plan "$@"
             ;;
         plan-gen)
             shift
-            exec "$(dirname "$0")/claudefsd-plan-gen" "$@"
+            exec cclaudefsd-plan-gen "$@"
             ;;
         *)
             echo -e "${RED}Unknown command: $1${NC}"
