@@ -1,9 +1,9 @@
 {
   "name": "cclaude-fsd",
-  "version": "1.1.5.1",
+  "version": "1.1.7",
   "description": "Claude Full Stack Development - AI-powered development team using Claude Code with ultrathink",
   "bin": {
-    "cclaude-fsd": "./bin/claude-fsd",
+    "cclaude-fsd": "./bin/cclaude-fsd",
     "cclaudefsd": "./bin/claudefsd",
     "cclaudefsd-check-dependencies": "./bin/claudefsd-check-dependencies",
     "cclaudefsd-dev": "./bin/claudefsd-dev",
