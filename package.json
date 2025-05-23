@@ -1,14 +1,14 @@
 {
-  "name": "claude-fsd",
+  "name": "cclaude-fsd",
   "version": "1.1.5.1",
   "description": "Claude Full Stack Development - AI-powered development team using Claude Code with ultrathink",
   "bin": {
-    "claude-fsd": "./bin/claude-fsd",
-    "claudefsd": "./bin/claudefsd",
-    "claudefsd-check-dependencies": "./bin/claudefsd-check-dependencies",
-    "claudefsd-dev": "./bin/claudefsd-dev",
-    "claudefsd-plan": "./bin/claudefsd-plan",
-    "claudefsd-plan-gen": "./bin/claudefsd-plan-gen"
+    "cclaude-fsd": "./bin/claude-fsd",
+    "cclaudefsd": "./bin/claudefsd",
+    "cclaudefsd-check-dependencies": "./bin/claudefsd-check-dependencies",
+    "cclaudefsd-dev": "./bin/claudefsd-dev",
+    "cclaudefsd-plan": "./bin/claudefsd-plan",
+    "cclaudefsd-plan-gen": "./bin/claudefsd-plan-gen"
   },
   "files": [
     "bin/"

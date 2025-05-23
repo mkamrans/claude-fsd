@@ -1,6 +1,6 @@
-# claude-fsd
+# cclaude-fsd
 
-Claude Full Stack Development (FSD) - Your AI-powered development team in a box.
+Claude Code Full Stack Development (FSD) - Your AI-powered development team in a box using Claude Code with ultrathink.
 
 ## What is this?
 
@@ -18,14 +18,14 @@ Think of it as having a full development team that never sleeps, never gets tire
 ## Installation
 
 ```bash
-npm install -g claude-fsd
+npm install -g cclaude-fsd
 ```
 
 ## Quick Start
 
 Just run:
 ```bash
-claude-fsd    # or claudefsd - both work the same
+cclaude-fsd    # or cclaudefsd - both work the same
 ```
 
 You'll get an interactive menu to choose what you want to do. It's that simple!
@@ -34,18 +34,18 @@ You'll get an interactive menu to choose what you want to do. It's that simple!
 
 ### Main wrapper command
 ```bash
-claude-fsd        # Interactive mode (recommended for beginners)
-claude-fsd dev    # Jump straight into development mode
-claude-fsd plan   # Jump straight into planning mode
-claude-fsd plan-gen # Generate a new project plan
+cclaude-fsd        # Interactive mode (recommended for beginners)
+cclaude-fsd dev    # Jump straight into development mode
+cclaude-fsd plan   # Jump straight into planning mode
+cclaude-fsd plan-gen # Generate a new project plan
 
-# claudefsd also works the same way
-claudefsd         # Same as claude-fsd
+# cclaudefsd also works the same way
+cclaudefsd         # Same as cclaude-fsd
 ```
 
 ### Individual commands (if you know what you're doing)
 
-#### claudefsd-dev
+#### cclaudefsd-dev
 Runs the development agent fleet. This command:
 - Reads your project plan from `docs/PLAN.md`
 - Picks the next open task
@@ -56,14 +56,14 @@ Runs the development agent fleet. This command:
 
 Every 4th cycle, it activates "megathinking mode" for architectural planning. Code review uses ultrathink for thorough analysis.
 
-#### claudefsd-plan
+#### cclaudefsd-plan
 Interactive planning session where you work with AI to:
 - Define project requirements
 - Break down complex features into tasks
 - Prioritize and organize work
 - Update the project roadmap
 
-#### claudefsd-plan-gen
+#### cclaudefsd-plan-gen
 Generates an initial project plan from scratch using Claude Code's ultrathink for comprehensive analysis based on:
 - Your project requirements (`docs/REQUIREMENTS.md`)
 - Any existing code or documentation
