@@ -22,17 +22,7 @@ check_dependencies() {
         missing_deps+=("claude")
     fi
     
-    # Check for codex (optional but recommended)
-    if [ "$check_codex" = true ] && ! command_exists codex; then
-        warnings+=("codex is not installed. Some review features will be unavailable.")
-        warnings+=("Install it from: https://github.com/Codex-ai/codex")
-    fi
-    
-    # Check for OPENAI_API_KEY (optional for codex)
-    if [ "$check_codex" = true ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-        warnings+=("OPENAI_API_KEY is not set. Codex features will be limited.")
-        warnings+=("Set it with: export OPENAI_API_KEY='your-key-here'")
-    fi
+    # All AI processing now uses Claude Code with ultrathink - no additional dependencies needed
     
     # Show critical errors
     if [ ${#missing_deps[@]} -ne 0 ]; then

@@ -88,9 +88,7 @@ Plan → Develop → Review → Test → Commit → Repeat
 - Unix-like environment (macOS, Linux)
 - [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude` command)
 
-### Optional (but recommended)
-- [Codex](https://github.com/Codex-ai/codex) - For enhanced code review capabilities
-- OpenAI API key - For Codex features (set `OPENAI_API_KEY` environment variable)
+All AI processing is handled by Claude Code with built-in ultrathink capabilities.
 
 ## Project Structure
 

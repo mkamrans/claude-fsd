@@ -143,11 +143,9 @@ Do not include any additional commentary or explanations outside of these tagged
     echo -e "\033[32m== REVIEWING WORK (backgrounded)\033[0m"
     echo -e "\033[32m==================================================================\033[0m"
 
-    # run the static code reviewer (codex can't do the git push part yet, so we need to follow up with claude after)
-    # also run it in the background because it's very slow
-    # Only run if codex is available
-    if command -v codex >/dev/null 2>&1; then
-        (codex --full-auto -q "
+    # run the static code reviewer using Claude Code with ultrathink (replaces codex o3)
+    # run it in the background because it's thorough
+    (claude --dangerously-skip-permissions --ultrathink -p "
 You are the team's static code reviewer.
 A developer has completed this task: $nexttask
 The developer's notes are at $LOGFILE-developer .
@@ -171,9 +169,6 @@ the developer to complete the task properly.
 If you have any questions of the user for the future, you can add them to QUESTIONS.md.
 If you have any ideas for the future, you can add them to IDEAS.md.
 " > $LOGFILE-reviewer) &
-    else
-        echo "Codex not available, skipping static code review" > $LOGFILE-reviewer
-    fi
 
     echo -e "\033[32m==================================================================\033[0m"
     echo -e "\033[32m== REVIEWING/TESTING/COMMITTING WORK\033[0m"
