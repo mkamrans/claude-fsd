@@ -33,7 +33,7 @@ while true; do
         MEGATHINKING_MODE=""
     fi
 
-    time claude -p "
+    time claude --dangerously-skip-permissions -p "
 $MEGATHINKING_MODE
 Read docs/PLAN.md in order and tell me what's the first open task that needs to be 
 done by the developer. Include any context that relates to it , such as sub-bullet 

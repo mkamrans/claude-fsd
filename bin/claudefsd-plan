@@ -5,6 +5,22 @@ set -e
 # Check dependencies
 $(dirname "$0")/claudefsd-check-dependencies
 
+# Check if Claude permissions have been accepted
+if ! claude --dangerously-skip-permissions --help >/dev/null 2>&1; then
+    echo -e "\033[33m==================================================================\033[0m"
+    echo -e "\033[33m== PERMISSION ACCEPTANCE REQUIRED\033[0m"
+    echo -e "\033[33m==================================================================\033[0m"
+    echo
+    echo "Claude requires you to accept the --dangerously-skip-permissions flag"
+    echo "in an interactive session before it can be used in automated scripts."
+    echo
+    echo "Please run the following command once to accept permissions:"
+    echo -e "\033[32mclaude --dangerously-skip-permissions\033[0m"
+    echo
+    echo "After accepting, you can run this script again."
+    exit 1
+fi
+
 mkdir -p logs
 
 # Use a temporary directory for tmp files, as codex is sandboxed to this directory
