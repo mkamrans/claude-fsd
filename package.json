@@ -1,0 +1,34 @@
+{
+  "name": "oclaudefsd",
+  "version": "1.2.2",
+  "description": "Claude Full Stack Development - AI-powered development team using Claude Code with ultrathink",
+  "bin": {
+    "oclaudefsd": "./bin/claudefsd",
+    "oclaudefsd-check-dependencies": "./bin/claudefsd-check-dependencies",
+    "oclaudefsd-config": "./bin/claudefsd-config",
+    "oclaudefsd-dev": "./bin/claudefsd-dev",
+    "oclaudefsd-mount": "./bin/claudefsd-mount",
+    "oclaudefsd-plan": "./bin/claudefsd-plan",
+    "oclaudefsd-plan-gen": "./bin/claudefsd-plan-gen"
+  },
+  "files": [
+    "bin/"
+  ],
+  "keywords": [
+    "claude",
+    "development",
+    "project-management",
+    "cli",
+    "ai-development",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shah-AI-Ventures/oclaude-fsd.git"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

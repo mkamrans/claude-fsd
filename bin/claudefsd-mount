@@ -1,0 +1,345 @@
+#!/bin/bash
+
+set -e
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Load configuration
+CONFIG_FILE="$HOME/.config/oclaudefsd/config"
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# Docker configuration from config
+DOCKER_IMAGE="${DOCKER_IMAGE:-ghcr.io/anthropics/claude-code:latest}"
+DOCKER_CONTAINER="${DOCKER_CONTAINER:-claude-code}"
+
+# Container mapping file - stores project-to-container mappings
+CONTAINER_MAP_FILE="$HOME/.config/oclaudefsd/container_mappings"
+mkdir -p "$(dirname "$CONTAINER_MAP_FILE")"
+
+# Function to export dynamic container name for parent process
+export_container_name() {
+    local container_name="$1"
+    local current_dir="$(pwd)"
+    # Export to both PID-based and path-based files
+    echo "export DYNAMIC_DOCKER_CONTAINER='$container_name'" > /tmp/oclaudefsd_container_$$.sh
+    # Use a stable hash of the directory path
+    local path_hash=$(echo "$current_dir" | shasum | cut -d' ' -f1)
+    echo "export DYNAMIC_DOCKER_CONTAINER='$container_name'" > "/tmp/oclaudefsd_container_${path_hash}.sh"
+}
+
+# Function to check if container exists
+container_exists() {
+    docker ps -a --format '{{.Names}}' | grep -q "^$1$"
+}
+
+# Function to check if container is running
+container_running() {
+    docker ps --format '{{.Names}}' | grep -q "^$1$"
+}
+
+# Function to save container mapping
+save_container_mapping() {
+    local project_dir="$1"
+    local container_name="$2"
+    
+    # Remove any existing mapping for this project
+    if [ -f "$CONTAINER_MAP_FILE" ]; then
+        grep -v "^$project_dir|" "$CONTAINER_MAP_FILE" > "$CONTAINER_MAP_FILE.tmp" || true
+        mv "$CONTAINER_MAP_FILE.tmp" "$CONTAINER_MAP_FILE"
+    fi
+    
+    # Add new mapping
+    echo "$project_dir|$container_name" >> "$CONTAINER_MAP_FILE"
+}
+
+# Function to get container for project
+get_container_for_project() {
+    local project_dir="$1"
+    
+    if [ -f "$CONTAINER_MAP_FILE" ]; then
+        grep "^$project_dir|" "$CONTAINER_MAP_FILE" | cut -d'|' -f2 | head -1
+    fi
+}
+
+# Function to remove container mapping
+remove_container_mapping() {
+    local project_dir="$1"
+    
+    if [ -f "$CONTAINER_MAP_FILE" ]; then
+        grep -v "^$project_dir|" "$CONTAINER_MAP_FILE" > "$CONTAINER_MAP_FILE.tmp" || true
+        mv "$CONTAINER_MAP_FILE.tmp" "$CONTAINER_MAP_FILE"
+    fi
+}
+
+# Function to find or create container for project
+find_or_create_container() {
+    local current_dir="$(pwd)"
+    
+    # First check if we have a saved mapping for this project
+    local saved_container=$(get_container_for_project "$current_dir")
+    if [ -n "$saved_container" ] && container_exists "$saved_container"; then
+        # Verify it still has our directory mounted
+        local mounted_dir=$(docker inspect "$saved_container" --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+        if [ "$mounted_dir" = "$current_dir" ]; then
+            echo "$saved_container"
+            return
+        fi
+    fi
+    
+    # Check if the base container has our directory
+    if container_exists "$DOCKER_CONTAINER"; then
+        local mounted_dir=$(docker inspect "$DOCKER_CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+        if [ "$mounted_dir" = "$current_dir" ]; then
+            save_container_mapping "$current_dir" "$DOCKER_CONTAINER"
+            echo "$DOCKER_CONTAINER"
+            return
+        fi
+    fi
+    
+    # Find an available container name (only check our managed containers)
+    local base_name="${DOCKER_CONTAINER}"
+    local counter=1
+    while container_exists "${base_name}-fsd-${counter}"; do
+        counter=$((counter + 1))
+    done
+    
+    local new_container="${base_name}-fsd-${counter}"
+    save_container_mapping "$current_dir" "$new_container"
+    echo "$new_container"
+}
+
+# Function to mount project directory
+mount_project() {
+    local current_dir="$(pwd)"
+    local container_name=$(find_or_create_container)
+    
+    echo -e "${BLUE}🔗 Mounting project directory for Claude access...${NC}"
+    echo "Project: $current_dir"
+    echo "Container: $container_name"
+    
+    # Check if container already exists and is running
+    if container_exists "$container_name"; then
+        if container_running "$container_name"; then
+            echo -e "${GREEN}✓ Container already running with project mounted${NC}"
+            # Export the container name for the calling script
+            export_container_name "$container_name"
+            return 0
+        else
+            echo -e "${YELLOW}Starting existing container...${NC}"
+            docker start "$container_name" >/dev/null
+            echo -e "${GREEN}✓ Container started with project mounted${NC}"
+            export_container_name "$container_name"
+            return 0
+        fi
+    fi
+    
+    # Determine the correct image to use
+    local image_to_use="$DOCKER_IMAGE"
+    # Check if the old hardcoded image exists locally
+    if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^vsc-claude-code-27e7ea167b2552a7a369df01efafa8e98336dc34cb4f120587b41b69a8883b77:latest$"; then
+        image_to_use="vsc-claude-code-27e7ea167b2552a7a369df01efafa8e98336dc34cb4f120587b41b69a8883b77"
+    fi
+    
+    # Start new container
+    echo -e "${YELLOW}Starting new container with project mounted...${NC}"
+    local container_id=$(docker run -d \
+        --name "$container_name" \
+        -v "$current_dir:/workspace" \
+        -w /workspace \
+        --memory=8g \
+        --restart unless-stopped \
+        "$image_to_use" \
+        tail -f /dev/null)
+    
+    if [ -n "$container_id" ]; then
+        echo "$container_id" > /dev/null  # Suppress the container ID output
+        echo -e "${GREEN}✓ Container started with project mounted${NC}"
+        export_container_name "$container_name"
+        return 0
+    else
+        echo -e "${RED}❌ Failed to start container${NC}"
+        return 1
+    fi
+}
+
+# Function to unmount (stop and remove specific container)
+unmount_project() {
+    local current_dir="$(pwd)"
+    local container_name=$(get_container_for_project "$current_dir")
+    
+    if [ -z "$container_name" ]; then
+        echo -e "${YELLOW}No container mapped for this project${NC}"
+        return 0
+    fi
+    
+    # Only proceed if it's one of our managed containers (has -fsd- in name) or is the base container
+    if [[ ! "$container_name" =~ -fsd- ]] && [ "$container_name" != "$DOCKER_CONTAINER" ]; then
+        echo -e "${RED}❌ Container '$container_name' is not managed by oclaudefsd${NC}"
+        return 1
+    fi
+    
+    echo -e "${BLUE}🔓 Unmounting project directory...${NC}"
+    echo "Container: $container_name"
+    
+    # Require confirmation
+    read -p "Are you sure you want to stop and remove this container? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}Cancelled${NC}"
+        return 0
+    fi
+    
+    # Stop container if running
+    if container_running "$container_name"; then
+        echo -e "${YELLOW}Stopping container...${NC}"
+        docker stop "$container_name" >/dev/null 2>&1 || true
+    fi
+    
+    # Remove container if it exists
+    if container_exists "$container_name"; then
+        echo -e "${YELLOW}Removing container...${NC}"
+        docker rm "$container_name" >/dev/null 2>&1 || true
+    fi
+    
+    # Remove mapping
+    remove_container_mapping "$current_dir"
+    
+    echo -e "${GREEN}✓ Project unmounted${NC}"
+}
+
+# Function to check mount status
+check_mount_status() {
+    local current_dir="$(pwd)"
+    local container_name=$(get_container_for_project "$current_dir")
+    
+    if [ -n "$container_name" ] && container_running "$container_name"; then
+        echo -e "${GREEN}✓ Current directory is mounted in Claude container${NC}"
+        echo "Project: $current_dir"
+        echo "Container: $container_name"
+        # Export for use by other scripts
+        export_container_name "$container_name"
+        return 0
+    else
+        echo -e "${YELLOW}📁 Current directory ($current_dir) is not mounted for Claude access.${NC}"
+        return 1
+    fi
+}
+
+# Function to auto-mount with confirmation
+auto_mount() {
+    # Only auto-mount if using Docker
+    if [ "${CLAUDE_TYPE}" != "docker" ]; then
+        return 0
+    fi
+    
+    if check_mount_status >/dev/null 2>&1; then
+        local current_dir="$(pwd)"
+        local container_name=$(get_container_for_project "$current_dir")
+        echo -e "${GREEN}✓ Claude can access files in: $current_dir${NC}"
+        export_container_name "$container_name"
+        return 0
+    fi
+    
+    mount_project
+}
+
+# Function to clean up orphaned containers
+cleanup_containers() {
+    echo -e "${BLUE}🧹 Cleaning up orphaned oclaudefsd containers...${NC}"
+    
+    # Find all our managed containers
+    local managed_containers=$(docker ps -a --format '{{.Names}}' | grep -E "${DOCKER_CONTAINER}-fsd-[0-9]+$" || true)
+    
+    if [ -z "$managed_containers" ]; then
+        echo -e "${GREEN}No orphaned containers found${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}Found the following oclaudefsd containers:${NC}"
+    echo "$managed_containers"
+    echo
+    
+    read -p "Remove all orphaned oclaudefsd containers? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}Cancelled${NC}"
+        return 0
+    fi
+    
+    # Remove each container
+    while IFS= read -r container; do
+        if [ -n "$container" ]; then
+            echo -e "${YELLOW}Removing $container...${NC}"
+            docker stop "$container" >/dev/null 2>&1 || true
+            docker rm "$container" >/dev/null 2>&1 || true
+        fi
+    done <<< "$managed_containers"
+    
+    echo -e "${GREEN}✓ Cleanup complete${NC}"
+}
+
+# Main command handling
+case "${1:-status}" in
+    mount)
+        mount_project
+        ;;
+    unmount)
+        unmount_project
+        ;;
+    remount)
+        unmount_project
+        sleep 1
+        mount_project
+        ;;
+    status)
+        check_mount_status
+        ;;
+    auto)
+        auto_mount
+        ;;
+    cleanup)
+        cleanup_containers
+        ;;
+    list)
+        echo -e "${BLUE}Project to container mappings:${NC}"
+        if [ -f "$CONTAINER_MAP_FILE" ]; then
+            cat "$CONTAINER_MAP_FILE" | while IFS='|' read -r project container; do
+                if [ -n "$project" ]; then
+                    if container_running "$container"; then
+                        echo -e "${GREEN}✓${NC} $project → $container (running)"
+                    else
+                        echo -e "${YELLOW}○${NC} $project → $container (stopped)"
+                    fi
+                fi
+            done
+        else
+            echo "No mappings found"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {mount|unmount|remount|status|auto|cleanup|list}"
+        echo
+        echo "Commands:"
+        echo "  mount    - Mount current directory for Claude access"
+        echo "  unmount  - Stop and remove container for current project"
+        echo "  remount  - Restart container with current directory mounted"
+        echo "  status   - Check if current directory is mounted"
+        echo "  auto     - Auto-mount if needed"
+        echo "  cleanup  - Remove all orphaned oclaudefsd containers (with confirmation)"
+        echo "  list     - Show all project-to-container mappings"
+        echo
+        echo "This version:"
+        echo "  - Supports multiple concurrent containers"
+        echo "  - Persists project-to-container mappings"
+        echo "  - Only manages containers created by oclaudefsd"
+        echo "  - Requires confirmation before removing containers"
+        exit 1
+        ;;
+esac

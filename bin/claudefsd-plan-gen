@@ -1,0 +1,118 @@
+#!/bin/bash
+
+set -e
+
+# Source the retry logic
+# Get the directory where this script really lives (following symlinks)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ $SCRIPT_PATH != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+# Source the retry logic
+if [ -f "$SCRIPT_DIR/claude-retry-common.sh" ]; then
+    source "$SCRIPT_DIR/claude-retry-common.sh"
+else
+    echo "Warning: Could not find claude-retry-common.sh in $SCRIPT_DIR" >&2
+    # Define no-op functions to prevent errors
+    execute_claude_with_retry() { "$@"; }
+    execute_claude_with_retry_and_log() { eval "$1" 2>&1 | tee "$2"; }
+    claude_with_retry() { "$@"; }
+fi
+
+# Get Claude command (use CLAUDE_CMD if set, otherwise default to 'claude')
+CLAUDE_CMD="${CLAUDE_CMD:-claude}"
+
+# Check dependencies
+# Check if running from npm global install or local development
+if command -v oclaudefsd-check-dependencies &> /dev/null; then
+    # Global npm install - use the prefixed command
+    oclaudefsd-check-dependencies
+else
+    # Local development - use absolute path
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "$SCRIPT_DIR/claudefsd-check-dependencies"
+fi
+
+# Check if Claude permissions have been accepted
+if ! $CLAUDE_CMD --dangerously-skip-permissions --help >/dev/null 2>&1; then
+    echo -e "\033[33m==================================================================\033[0m"
+    echo -e "\033[33m== PERMISSION ACCEPTANCE REQUIRED\033[0m"
+    echo -e "\033[33m==================================================================\033[0m"
+    echo
+    echo "Claude requires you to accept the --dangerously-skip-permissions flag"
+    echo "in an interactive session before it can be used in automated scripts."
+    echo
+    echo "Please run the following command once to accept permissions:"
+    echo -e "\033[32m$CLAUDE_CMD --dangerously-skip-permissions\033[0m"
+    echo
+    echo "After accepting, you can run this script again."
+    exit 1
+fi
+
+mkdir -p logs
+
+# Use a temporary directory for tmp files, as codex is sandboxed to this directory
+mkdir -p tmp
+export TMPDIR=tmp/
+
+# look for a brief file
+if [ ! -f BRIEF.md ]; then
+    echo "No BRIEF.md file found, please create one first "
+    exit 1
+fi
+
+LOGFILE="logs/claude-$(date +%Y%m%d_%H%M%S).txt"
+
+echo -e "\033[32m==================================================================\033[0m"
+echo -e "\033[32m== PROCESSING THE QUESTIONS IN QUESTIONS.md\033[0m"
+echo -e "\033[32m==================================================================\033[0m"
+
+    prompt2="
+Read all of these documents if they exist:
+- BRIEF.md -- the project brief
+- docs/REQUIREMENTS.md -- the project requirements
+- docs/PLAN.md -- the project plan
+- docs/QUESTIONS.md -- the project questions
+- docs/IDEAS.md -- the backlog of future ideas
+- docs/WEBTESTS.md -- the project web tests
+- README.md -- the project README
+
+Your job, as a megathinking business analyst, project manager, architect and product manager, is to help solidify
+the requirements and plan.
+
+1. Read through these documents and pay particular attention to the questions and answers in QUESTIONS.md.
+2. Update the docs/REQUIREMENTS.md and docs/PLAN.md documents to incorporate the full brief and all answers.
+3. If the requirements and plan don't already exist, create them.
+
+If the brief, questions or answers have been updated, the requirements and plan will need to be updated.
+
+As part of this work, please consider our SDLC and what infrastructure will need to be established to ensure
+the system is compliant. Make sure the basics like a git repo and a pre-commit hook that call a custom
+linter are in the plan to be established if they don't exist now.
+Also make sure our work is being done on a feature branch.
+Other than that, DO NOT get distracted by infrastructure, stick with the YAGNI principle.
+Just ensure the basic branching and linter is working and move on.
+Focus on the user's brief and answers from docs/QUESTIONS.md, and the plan.
+"
+
+# run BA's
+echo "Running claude..."
+execute_claude_with_retry_and_log "$CLAUDE_CMD --dangerously-skip-permissions -p \"$prompt2\"" "$LOGFILE-ba3-$round"
+
+echo "Running claude with ultrathink (results won't display)..."
+execute_claude_with_retry "$CLAUDE_CMD --dangerously-skip-permissions -p \"Make sure you ultrathink about this
+
+$prompt2\"" > $LOGFILE-ba4-$round
+
+echo -e "\033[32m==================================================================\033[0m"
+echo -e "\033[32m== DONE\033[0m"
+echo -e "\033[32m==================================================================\033[0m"
+echo "You can now run claudefsd-dev to start the development process."
+echo "Or do one more round of claudefsd-plan to cover more questions."
+
+
+

@@ -1,0 +1,300 @@
+#!/bin/bash
+
+set -e
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Function to show version
+show_version() {
+    echo "oclaudefsd version 1.2.2"
+}
+
+# Function to show help
+show_help() {
+    echo "Usage: oclaudefsd [command] [options]"
+    echo ""
+    echo "Commands:"
+    echo "  dev           Run development mode (default)"
+    echo "  plan          Run planning mode"
+    echo "  plan-gen      Generate initial plan"
+    echo "  config        Configure settings"
+    echo "  version       Show version"
+    echo "  help          Show this help"
+    echo ""
+    echo "Options (for dev command):"
+    echo "  -v            Verbose output"
+    echo "  -q            Quiet mode (minimal output)"
+    echo "  -s            Show progress indicators"
+    echo "  --claude-cmd=<cmd>  Override Claude command for this run"
+}
+
+# Handle version and help commands
+if [ "${1:-}" = "version" ]; then
+    show_version
+    exit 0
+fi
+
+if [ "${1:-}" = "help" ]; then
+    show_help
+    exit 0
+fi
+
+# Configuration file location
+CONFIG_FILE="$HOME/.config/oclaudefsd/config"
+
+# Load configuration if it exists
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# Default Claude command (use 'claude' as default for better compatibility)
+CLAUDE_CMD="${CLAUDE_CMD:-claude}"
+
+# Parse command line options for claude-cmd and rebuild args
+args=()
+for arg in "$@"; do
+    case $arg in
+        --claude-cmd=*)
+            CLAUDE_CMD="${arg#*=}"
+            ;;
+        *)
+            args+=("$arg")
+            ;;
+    esac
+done
+
+# Export for child processes
+export CLAUDE_CMD
+export CLAUDE_TYPE
+export DOCKER_CONTAINER
+
+# Replace positional parameters with filtered args
+set -- "${args[@]}"
+
+# Check if this is first run (no config file)
+if [ ! -f "$CONFIG_FILE" ] && [ "$1" != "config" ]; then
+    echo -e "${YELLOW}👋 Welcome to oclaudefsd!${NC}"
+    echo
+    echo "It looks like this is your first time running oclaudefsd."
+    echo "Let's set up your Claude configuration."
+    echo
+    # Check if running from npm global install or local development
+    if command -v oclaudefsd-config &> /dev/null; then
+        # Global npm install - use the prefixed command
+        exec oclaudefsd-config setup
+    else
+        # Local development - use absolute path
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        exec "$SCRIPT_DIR/claudefsd-config" setup
+    fi
+fi
+
+# Function to display the menu
+show_menu() {
+    echo -e "${GREEN}🤖 Claude Code Full Stack Development (FSD) Tool${NC}"
+    echo
+    echo "This tool helps you manage development projects using AI agents."
+    echo "Think of it as your AI-powered development team!"
+    echo
+    
+    # Function to check if file exists case-insensitively
+    file_exists_ci() {
+        local pattern="$1"
+        [ -n "$(find . -maxdepth 2 -iname "$pattern" -type f 2>/dev/null | head -1)" ]
+    }
+    
+    # Check project status
+    if ! file_exists_ci "plan.md"; then
+        echo -e "${YELLOW}📋 No project plan found. You'll need to create one first.${NC}"
+        echo
+    fi
+    
+    echo "What would you like to do?"
+    echo
+    echo "  1) Development mode (default) - AI agents work on coding tasks"
+    if ! file_exists_ci "plan.md"; then
+        echo -e "     ${YELLOW}(Requires PLAN.md or plan.md)${NC}"
+    fi
+    echo "  2) Planning mode - AI agents help plan your project"
+    if ! file_exists_ci "brief.md"; then
+        echo -e "     ${YELLOW}(Requires BRIEF.md or brief.md)${NC}"
+    fi
+    echo "  3) Generate initial plan - Create a new project plan from scratch"
+    echo "  4) Exit"
+    echo
+}
+
+# If no arguments provided, show interactive menu
+if [ $# -eq 0 ]; then
+    # Check dependencies for interactive mode
+    # Check if running from npm global install or local development
+    if command -v oclaudefsd-check-dependencies &> /dev/null; then
+        # Global npm install - source the prefixed command
+        source oclaudefsd-check-dependencies
+    else
+        # Local development - use absolute path
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        source "$SCRIPT_DIR/claudefsd-check-dependencies"
+    fi
+    check_dependencies
+    
+    show_menu
+    read -p "Enter your choice [1]: " choice
+    choice=${choice:-1}  # Default to 1 if empty
+    
+    case $choice in
+        1)
+            echo -e "${GREEN}Starting development mode...${NC}"
+            echo
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-dev &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-dev
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-dev"
+            fi
+            ;;
+        2)
+            echo -e "${GREEN}Starting planning mode...${NC}"
+            echo
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-plan &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-plan
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-plan"
+            fi
+            ;;
+        3)
+            echo -e "${GREEN}Starting plan generation...${NC}"
+            echo
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-plan-gen &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-plan-gen
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-plan-gen"
+            fi
+            ;;
+        4)
+            echo "Goodbye!"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Please run again.${NC}"
+            exit 1
+            ;;
+    esac
+else
+    # If arguments provided, pass them through to the appropriate command
+    case "$1" in
+        config)
+            shift
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-config &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-config "${1:-show}"
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-config" "${1:-show}"
+            fi
+            ;;
+        dev)
+            shift
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-dev &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-dev "$@"
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-dev" "$@"
+            fi
+            ;;
+        mount)
+            shift
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-mount &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-mount "$@"
+            else
+                # Local development - use absolute path to find claudefsd-mount in same directory
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-mount" "$@"
+            fi
+            ;;
+        plan)
+            shift
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-plan &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-plan "$@"
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-plan" "$@"
+            fi
+            ;;
+        plan-gen)
+            shift
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-plan-gen &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-plan-gen "$@"
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-plan-gen" "$@"
+            fi
+            ;;
+        version|--version)
+            show_version
+            exit 0
+            ;;
+        -v|--verbose|-p|--progress|-q|--quiet)
+            # Pass options to dev mode by default
+            # Check if running from npm global install or local development
+            if command -v oclaudefsd-dev &> /dev/null; then
+                # Global npm install - use the prefixed command
+                exec oclaudefsd-dev "$@"
+            else
+                # Local development - use absolute path
+                SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                exec "$SCRIPT_DIR/claudefsd-dev" "$@"
+            fi
+            ;;
+        help|-h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown command: $1${NC}"
+            echo
+            echo "Usage: oclaudefsd [options] [command]"
+            echo
+            echo "Options:"
+            echo "  --claude-cmd=<cmd>  - Specify Claude command (default: claude)"
+            echo
+            echo "Commands:"
+            echo "  config    - Configure Claude settings"
+            echo "  dev       - Run development mode"
+            echo "  mount     - Manage Docker mount (mount/unmount/remount/status)"
+            echo "  plan      - Run planning mode"
+            echo "  plan-gen  - Generate initial plan"
+            echo
+            echo "Run without arguments for interactive mode."
+            exit 1
+            ;;
+    esac
+fi

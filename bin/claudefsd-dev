@@ -1,0 +1,989 @@
+#!/bin/bash
+
+set -e
+
+# Source the retry logic
+# Get the directory where this script really lives (following symlinks)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ $SCRIPT_PATH != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+# Source the retry logic
+if [ -f "$SCRIPT_DIR/claude-retry-common.sh" ]; then
+    source "$SCRIPT_DIR/claude-retry-common.sh"
+else
+    echo "Warning: Could not find claude-retry-common.sh in $SCRIPT_DIR" >&2
+    # Define no-op functions to prevent errors
+    execute_claude_with_retry() { "$@"; }
+    execute_claude_with_retry_and_log() { eval "$1" 2>&1 | tee "$2"; }
+    claude_with_retry() { "$@"; }
+fi
+
+# Error handler
+error_handler() {
+    local line_no=$1
+    local error_code=$2
+    local bash_cmd="${BASH_COMMAND}"
+    echo -e "\033[31m❌ Error occurred in script at line $line_no with exit code $error_code\033[0m" >&2
+    echo "Failed command: $bash_cmd" >&2
+    echo "Current phase: ${CURRENT_PHASE:-Unknown}" >&2
+    echo "Iteration: ${LOOP_COUNTER:-0}" >&2
+    echo "" >&2
+    echo "If you're seeing this, please check:" >&2
+    echo "  - Your docs/PLAN.md file exists and is readable" >&2
+    echo "  - Your Claude configuration is correct (run: oclaudefsd config show)" >&2
+    echo "  - Your Docker container is running (if using Docker)" >&2
+    echo "  - Check log files in: .oclaude/logs/" >&2
+    
+    # Show recent log file content if available
+    if [ -n "${LOGFILE:-}" ]; then
+        echo "" >&2
+        echo "Log files:" >&2
+        ls -la "${LOGFILE}"* 2>/dev/null || echo "No log files found" >&2
+        
+        if [ -f "$LOGFILE-developer" ]; then
+            echo "" >&2
+            echo "Recent developer log output:" >&2
+            tail -20 "$LOGFILE-developer" 2>/dev/null || echo "Could not read developer log" >&2
+        fi
+    fi
+    
+    exit $error_code
+}
+
+# Set error trap
+trap 'error_handler ${LINENO} $?' ERR
+
+# Parse command line arguments
+VERBOSE=false
+SHOW_PROGRESS=false
+QUIET=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        -p|--progress)
+            SHOW_PROGRESS=true
+            shift
+            ;;
+        -q|--quiet)
+            QUIET=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [options]"
+            echo "Options:"
+            echo "  -v, --verbose    Show detailed output and progress"
+            echo "  -p, --progress   Show progress indicators and timestamps"
+            echo "  -q, --quiet      Minimal output (overrides verbose/progress)"
+            echo "  -h, --help       Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use -h or --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Check dependencies
+# Check if running from npm global install or local development
+if command -v oclaudefsd-check-dependencies &> /dev/null; then
+    # Global npm install - use the prefixed command
+    oclaudefsd-check-dependencies
+else
+    # Local development - use absolute path
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "$SCRIPT_DIR/claudefsd-check-dependencies"
+fi
+
+# Get Claude command (use CLAUDE_CMD if set, otherwise default to 'claude')
+CLAUDE_CMD="${CLAUDE_CMD:-claude}"
+
+# Function to get the actual Claude command (considering dynamic container)
+get_actual_claude_cmd() {
+    if [ "${CLAUDE_TYPE}" = "docker" ] && [ -n "${ACTUAL_DOCKER_CONTAINER}" ]; then
+        echo "docker exec ${ACTUAL_DOCKER_CONTAINER} claude"
+    else
+        echo "$CLAUDE_CMD"
+    fi
+}
+
+# Function to convert paths for Docker workspace
+get_workspace_path() {
+    local path="$1"
+    if [ "${CLAUDE_TYPE}" = "docker" ]; then
+        # Convert absolute paths to workspace-relative
+        if [[ "$path" = /* ]]; then
+            # It's an absolute path, make it relative to current directory
+            path=$(realpath --relative-to="$(pwd)" "$path" 2>/dev/null || echo "$path")
+        fi
+        # Ensure it starts with /workspace/
+        if [[ "$path" != /workspace/* ]]; then
+            echo "/workspace/$path"
+        else
+            echo "$path"
+        fi
+    else
+        echo "$path"
+    fi
+}
+
+# Function to find file case-insensitively
+find_file_ci() {
+    local dir="$1"
+    local filename="$2"
+    find "$dir" -maxdepth 1 -iname "$filename" -type f 2>/dev/null | head -1
+}
+
+# Function to find file in multiple locations case-insensitively
+find_project_file() {
+    local filename="$1"
+    local file
+    
+    # Try docs directory first
+    file=$(find_file_ci "docs" "$filename")
+    if [ -n "$file" ]; then
+        echo "$file"
+        return
+    fi
+    
+    # Try current directory
+    file=$(find_file_ci "." "$filename")
+    if [ -n "$file" ]; then
+        echo "$file"
+        return
+    fi
+}
+
+# Check for required files (case-insensitive)
+PLAN_FILE=$(find_project_file "plan.md")
+
+if [ -z "$PLAN_FILE" ]; then
+    echo -e "\033[31m❌ Missing required file: PLAN.md (or plan.md)\033[0m"
+    echo
+    echo "The development mode requires a project plan to work from."
+    echo "Searched in: ./docs/PLAN.md, ./docs/plan.md, ./PLAN.md, ./plan.md"
+    echo
+    echo "Please create a plan file with your project tasks, or run:"
+    echo -e "\033[32moclaudefsd plan-gen\033[0m to generate one interactively."
+    echo
+    echo "Example PLAN.md structure:"
+    echo "# Project Plan"
+    echo "## Phase 1: Initial Setup"
+    echo "- [ ] Task 1: Set up project structure"
+    echo "- [ ] Task 2: Create initial components"
+    echo
+    exit 1
+fi
+
+echo "Found plan file: $PLAN_FILE"
+
+# Test Claude command before starting
+echo "Testing Claude configuration..."
+if ! $CLAUDE_CMD --version >/dev/null 2>&1; then
+    echo -e "\033[31m❌ Claude command test failed\033[0m"
+    echo "Command: $CLAUDE_CMD --version"
+    echo ""
+    echo "Please check:"
+    echo "  - Your Claude configuration (run: oclaudefsd config show)"
+    echo "  - Docker container is running (if using Docker)"
+    echo "  - The command is accessible"
+    exit 1
+fi
+echo "✓ Claude command works"
+
+# Initialize ACTUAL_DOCKER_CONTAINER
+ACTUAL_DOCKER_CONTAINER=""
+
+# Auto-mount project directory if using Docker
+if [ "${CLAUDE_TYPE}" = "docker" ]; then
+    echo "Checking Docker mount status..."
+    # Check if running from npm global install or local development
+    if command -v oclaudefsd-mount &> /dev/null; then
+        # Global npm install - use the prefixed command
+        if ! oclaudefsd-mount auto; then
+            echo -e "\033[31m❌ Mount setup failed or was declined\033[0m"
+            echo "Continuing anyway, but Claude may not be able to access project files."
+            echo ""
+        else
+            # Source the dynamic container name if available
+            if [ -f "/tmp/oclaudefsd_container_$$.sh" ]; then
+                source "/tmp/oclaudefsd_container_$$.sh"
+                # Use dynamic container if set, otherwise fall back to configured one
+                ACTUAL_DOCKER_CONTAINER="${DYNAMIC_DOCKER_CONTAINER:-$DOCKER_CONTAINER}"
+            fi
+        fi
+    else
+        # Local development - use absolute path to find claudefsd-mount in same directory
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if ! "$SCRIPT_DIR/claudefsd-mount" auto; then
+            echo -e "\033[31m❌ Mount setup failed or was declined\033[0m"
+            echo "Continuing anyway, but Claude may not be able to access project files."
+            echo ""
+        else
+            # Source the dynamic container name if available
+            if [ -f "/tmp/oclaudefsd_container_$$.sh" ]; then
+                source "/tmp/oclaudefsd_container_$$.sh"
+                # Use dynamic container if set, otherwise fall back to configured one
+                ACTUAL_DOCKER_CONTAINER="${DYNAMIC_DOCKER_CONTAINER:-$DOCKER_CONTAINER}"
+            fi
+        fi
+    fi
+    
+    # If we still don't have an actual container, check for the temp file again
+    if [ -z "$ACTUAL_DOCKER_CONTAINER" ] && [ -f "/tmp/oclaudefsd_container_$$.sh" ]; then
+        source "/tmp/oclaudefsd_container_$$.sh"
+        ACTUAL_DOCKER_CONTAINER="${DYNAMIC_DOCKER_CONTAINER:-$DOCKER_CONTAINER}"
+    fi
+    
+    # Also check the path-based file
+    if [ -z "$ACTUAL_DOCKER_CONTAINER" ]; then
+        path_hash=$(pwd | shasum | cut -d' ' -f1)
+        if [ -f "/tmp/oclaudefsd_container_${path_hash}.sh" ]; then
+            source "/tmp/oclaudefsd_container_${path_hash}.sh"
+            ACTUAL_DOCKER_CONTAINER="${DYNAMIC_DOCKER_CONTAINER:-$DOCKER_CONTAINER}"
+        fi
+    fi
+fi
+
+# Helper function for conditional output
+log_verbose() {
+    if [ "$VERBOSE" = "true" ] && [ "$QUIET" != "true" ]; then
+        echo -e "$@"
+    fi
+}
+
+log_progress() {
+    if [ "$SHOW_PROGRESS" = "true" ] && [ "$QUIET" != "true" ]; then
+        echo -e "$@"
+    fi
+}
+
+log_info() {
+    if [ "$QUIET" != "true" ]; then
+        echo -e "$@"
+    fi
+}
+
+log_error() {
+    echo -e "$@" >&2
+}
+
+# Function to check for various Claude errors
+check_permissions_error() {
+    local output="$1"
+    local exit_code="${2:-$?}"  # Use provided exit code or last command's exit code
+    
+    # Check for permissions error
+    if echo "$output" | grep -q "dangerously-skip-permissions must be accepted in an interactive session first"; then
+        log_error "\n\033[91m⚠️  PERMISSION ERROR DETECTED\033[0m"
+        log_error "Claude requires you to accept permissions interactively first."
+        
+        if [ "${CLAUDE_TYPE}" = "docker" ]; then
+            # Use the actual container name (dynamic or default)
+            local container_to_use="${ACTUAL_DOCKER_CONTAINER:-$DOCKER_CONTAINER}"
+            log_error "\nPlease run: \033[93mdocker exec -it ${container_to_use} claude --dangerously-skip-permissions\033[0m"
+        else
+            log_error "\nPlease run: \033[93m$CLAUDE_CMD --dangerously-skip-permissions\033[0m"
+        fi
+        
+        log_error "Accept the permissions, then re-run this script."
+        exit 1
+    fi
+    
+    # Check for token/usage limit errors
+    if echo "$output" | grep -qE "(usage limit|token limit|out of tokens|insufficient tokens|quota exceeded|usage exceeded)"; then
+        log_error "\n\033[91m⚠️  TOKEN LIMIT ERROR DETECTED\033[0m"
+        log_error "You appear to have reached your Claude usage limit."
+        log_error "\nPossible solutions:"
+        log_error "  - Wait for your token limit to reset"
+        log_error "  - Check your Claude account usage at: https://console.anthropic.com"
+        log_error "  - Upgrade your Claude plan if needed"
+        log_error "\nError details:"
+        echo "$output" | grep -E "(usage limit|token limit|out of tokens|insufficient tokens|quota exceeded|usage exceeded)" | head -3
+        exit 1
+    fi
+    
+    # Check for rate limit errors (informational only - retry logic handles them)
+    if echo "$output" | grep -qE "(rate limit|too many requests|429|slow down|making requests too quickly)"; then
+        log_verbose "\n\033[93m⚠️  Rate limit encountered - automatic retry will handle this\033[0m"
+        # Don't exit - let the retry logic handle it
+    fi
+    
+    # Check for CLAUDE authentication errors (not git authentication)
+    if echo "$output" | grep -qE "(HTTP 401|HTTP 403|Invalid API key|Unauthorized request|API key.*invalid|Claude.*unauthorized)" && [ $exit_code -ne 0 ]; then
+        log_error "\n\033[91m⚠️  CLAUDE AUTHENTICATION ERROR DETECTED\033[0m"
+        log_error "There's an issue with your Claude authentication."
+        log_error "\nPlease check:"
+        log_error "  - Your Claude API key is valid"
+        log_error "  - Your authentication is properly configured"
+        log_error "  - Run: oclaudefsd config show"
+        exit 1
+    fi
+    
+    # Check for ACTUAL network/connection errors (be more specific to avoid false positives)
+    if echo "$output" | grep -qE "(curl:.*Could not resolve|curl:.*Connection refused|curl:.*Operation timed out|Failed to connect|Network is unreachable|Connection reset by peer)"; then
+        log_error "\n\033[91m⚠️  NETWORK ERROR DETECTED\033[0m"
+        log_error "Unable to connect to Claude."
+        log_error "\nPlease check:"
+        log_error "  - Your internet connection"
+        log_error "  - Claude service status"
+        log_error "  - Any firewall or proxy settings"
+        exit 1
+    fi
+    
+    # Check for CLAUDE-specific errors only when exit code indicates failure
+    if [ $exit_code -ne 0 ] && echo "$output" | grep -qE "(Claude error:|API error:|Model error:|Claude.*failed|Invalid request to Claude)"; then
+        log_error "\n\033[91m⚠️  CLAUDE ERROR DETECTED\033[0m"
+        log_error "Claude encountered an error while processing your request."
+        log_error "\nError output:"
+        echo "$output" | grep -E "(error:|failed:|exception:|Error|Failed|Exception)" | head -5
+        log_error "\nFor more details, check the full log file."
+        exit 1
+    fi
+    
+    # If we got here but the command failed, show the actual output
+    # Only flag as error if exit code is non-zero (don't match on word "error" in content)
+    if [ $exit_code -ne 0 ]; then
+        log_error "\n\033[91m⚠️  CLAUDE ERROR DETECTED\033[0m"
+        log_error "Claude command failed with exit code $exit_code."
+        log_error "\nHere's the actual response:"
+        log_error "\n------- CLAUDE ERROR OUTPUT -------"
+        echo "$output" | head -20 >&2
+        log_error "------- END ERROR OUTPUT -------"
+        log_error "\nThis might be a permissions issue. If so, try:"
+        if [ "${CLAUDE_TYPE}" = "docker" ]; then
+            local container_to_use="${ACTUAL_DOCKER_CONTAINER:-$DOCKER_CONTAINER}"
+            log_error "  docker exec -it ${container_to_use} claude --dangerously-skip-permissions"
+        else
+            log_error "  $CLAUDE_CMD --dangerously-skip-permissions"
+        fi
+        log_error "\nFor the full error, check the log file."
+        exit 1
+    fi
+}
+
+# Function to calculate elapsed time
+get_elapsed_time() {
+    local start_time=$1
+    local end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+    local minutes=$((elapsed / 60))
+    local seconds=$((elapsed % 60))
+    echo "${minutes}m ${seconds}s"
+}
+
+# Add counter for loop iterations
+LOOP_COUNTER=0
+
+# Set up .oclaude directory structure
+OCLAUDE_DIR=".oclaude"
+
+# Check if we can create directories in the current location
+if ! mkdir -p "$OCLAUDE_DIR" 2>/dev/null; then
+    echo -e "\033[31m❌ Cannot create .oclaude directory\033[0m" >&2
+    echo "This could be due to:" >&2
+    echo "  - Insufficient permissions in the current directory" >&2
+    echo "  - Read-only filesystem" >&2
+    echo "  - Disk full" >&2
+    echo "" >&2
+    echo "Please ensure you have write permissions in: $(pwd)" >&2
+    exit 1
+fi
+
+# Create subdirectories
+for dir in logs tmp cache; do
+    if ! mkdir -p "$OCLAUDE_DIR/$dir" 2>/dev/null; then
+        echo -e "\033[31m❌ Cannot create $OCLAUDE_DIR/$dir directory\033[0m" >&2
+        echo "Please check permissions and try again." >&2
+        exit 1
+    fi
+done
+
+# Set TMPDIR to use .oclaude/tmp for all temp files (no trailing slash)
+export TMPDIR="$OCLAUDE_DIR/tmp"
+
+# Test write permissions by creating a test file
+TEST_FILE="$OCLAUDE_DIR/.write_test_$$"
+if ! touch "$TEST_FILE" 2>/dev/null; then
+    echo -e "\033[31m❌ Cannot write to .oclaude directory\033[0m" >&2
+    echo "The directory exists but is not writable." >&2
+    echo "Please check permissions: ls -la .oclaude" >&2
+    exit 1
+fi
+rm -f "$TEST_FILE"
+
+# Create .gitignore for .oclaude if it doesn't exist
+if [ ! -f "$OCLAUDE_DIR/.gitignore" ]; then
+    if ! echo "# Ignore all files in .oclaude directory" > "$OCLAUDE_DIR/.gitignore" 2>/dev/null; then
+        echo -e "\033[33m⚠️  Warning: Cannot create .oclaude/.gitignore\033[0m" >&2
+        echo "The .oclaude directory contents may be tracked by git." >&2
+        # This is just a warning, don't exit
+    else
+        echo "*" >> "$OCLAUDE_DIR/.gitignore"
+        echo "!.gitignore" >> "$OCLAUDE_DIR/.gitignore"
+    fi
+fi
+
+# Also ensure .oclaude is in the project's .gitignore
+if [ -f ".gitignore" ]; then
+    # Check if we can write to .gitignore
+    if [ -w ".gitignore" ]; then
+        if ! grep -q "^\.oclaude" .gitignore; then
+            echo "" >> .gitignore
+            echo "# OClaude FSD working directory" >> .gitignore
+            echo ".oclaude/" >> .gitignore
+            echo "✓ Added .oclaude/ to .gitignore"
+        fi
+    else
+        echo -e "\033[33m⚠️  Warning: Cannot update .gitignore (read-only)\033[0m" >&2
+        echo "Please manually add '.oclaude/' to your .gitignore file." >&2
+    fi
+elif [ -w "." ]; then
+    # No .gitignore exists but we can write to current directory
+    echo "# OClaude FSD working directory" > .gitignore
+    echo ".oclaude/" >> .gitignore
+    echo "✓ Created .gitignore with .oclaude/ entry"
+fi
+
+while true; do
+    # Increment loop counter
+    LOOP_COUNTER=$((LOOP_COUNTER + 1))
+    
+    LOGFILE="$OCLAUDE_DIR/logs/claude-$(date +%Y%m%d_%H%M%S).txt"
+    
+    # Test if we can create the log file
+    if ! touch "$LOGFILE" 2>/dev/null; then
+        echo -e "\033[31m❌ Cannot create log file: $LOGFILE\033[0m" >&2
+        echo "Please check that .oclaude/logs/ directory exists and is writable." >&2
+        exit 1
+    fi
+
+    echo "Logging to ${LOGFILE#$OCLAUDE_DIR/}-* ..."
+    log_verbose "💡 Tip: You can monitor progress in another terminal with:"
+    log_verbose "    tail -f ${LOGFILE}-*"
+    log_verbose ""
+    
+    # Track timing for each phase
+    PHASE_START=$(date +%s)
+
+    if [ "$QUIET" != "true" ]; then
+        echo -e "\033[32m==================================================================\033[0m"
+        echo -e "\033[32m== PLANNING NEXT TASK\033[0m"
+        CURRENT_PHASE="Planning"
+        if [ "$SHOW_PROGRESS" = "true" ]; then
+            echo -e "\033[32m== Iteration: $LOOP_COUNTER | Time: $(date '+%Y-%m-%d %H:%M:%S')\033[0m"
+        fi
+        echo -e "\033[32m==================================================================\033[0m"
+        if [ "$SHOW_PROGRESS" = "true" ]; then
+            echo -e "\033[33m⏳ Claude is analyzing the project plan...\033[0m"
+        fi
+    fi
+
+    # Check if this is the 4th iteration for megathinking mode
+    if [ $((LOOP_COUNTER % 4)) -eq 0 ]; then
+        log_info "\033[33m**** ULTRATHINK MODE ACTIVATED ****\033[0m"
+        log_info "\033[33mThis is your 4th development cycle. Taking a step back for architectural planning.\033[0m"
+        ULTRATHINK_MODE="<ultrathink>\nThis is your 4th development cycle. Before proceeding with the next task, please take a step back and think deeply about the architecture. Consider the overall structure of the codebase, potential refactoring opportunities, design patterns, technical debt, and how the current work connects to broader project goals.\n</ultrathink>\n\n"
+    else
+        ULTRATHINK_MODE=""
+    fi
+
+    # Use unbuffered output for real-time streaming
+    if [ "$VERBOSE" = "true" ] || [ "$SHOW_PROGRESS" = "true" ]; then
+        log_progress "\033[90m→ Asking Claude to identify the next task from PLAN.md\033[0m"
+        # Show the actual command that will be used (with dynamic container if applicable)
+        actual_cmd=$(get_actual_claude_cmd)
+        log_verbose "\033[90m  Using command: $actual_cmd\033[0m"
+        # Debug info
+        if [ "${DEBUG:-false}" = "true" ]; then
+            echo "DEBUG: CLAUDE_TYPE=$CLAUDE_TYPE" >&2
+            echo "DEBUG: ACTUAL_DOCKER_CONTAINER=$ACTUAL_DOCKER_CONTAINER" >&2
+            echo "DEBUG: DOCKER_CONTAINER=$DOCKER_CONTAINER" >&2
+        fi
+        log_verbose "\033[90m  (This typically takes 10-30 seconds)\033[0m"
+        log_verbose ""
+        
+        # Debug: Show what we're about to run
+        if [ "${DEBUG:-false}" = "true" ]; then
+            echo "DEBUG: About to run Claude with command: $(get_actual_claude_cmd) --dangerously-skip-permissions -p \"...\"" >&2
+        fi
+        
+        # Show Claude's output in real-time
+        # Create temp file for planning prompt
+        plan_prompt_file="$TMPDIR/plan-prompt-$$-$(date +%s).txt"
+        cat > "$plan_prompt_file" <<PLAN_PROMPT_END
+$ULTRATHINK_MODE
+Read $(get_workspace_path "$PLAN_FILE") in order and tell me what's the first open task that needs to be 
+done by the developer. Include any context that relates to it , such as sub-bullet 
+points or the section the todo item lives in. 
+Also bring in any related context from any BRIEF.md, QUESTIONS.md and REQUIREMENTS.md files you can find.
+Really think this through, as
+the developer will need not just to have blinders on when doing a dev task, but
+also sometimes will need to think about the bigger picture. Particularly if it's
+been stuck in the weeds making a ton of changes when sometimes a single fix
+can clear out a thousand errors. Please consider what are the lowest risk changes
+that achieve the task goal, since you knoow the full plan and the developer
+doesn't necessarily see it.
+
+If the plan is complete, say <ALL DONE>.
+PLAN_PROMPT_END
+        
+        # Use the new function that handles prompt files properly
+        output=$(execute_claude_with_retry_from_file "$LOGFILE-planner" "$(get_actual_claude_cmd)" "$plan_prompt_file")
+        cmd_exit_code=$?
+        rm -f "$plan_prompt_file"
+        
+        # Debug: Log the output for troubleshooting
+        if [ "${DEBUG:-false}" = "true" ]; then
+            echo "DEBUG: Command exit code: $cmd_exit_code" >&2
+            echo "DEBUG: Output length: ${#output}" >&2
+            echo "DEBUG: First 200 chars of output: ${output:0:200}" >&2
+        fi
+        
+        check_permissions_error "$output" $cmd_exit_code
+        
+        # Check if Claude command failed
+        if [ $cmd_exit_code -ne 0 ]; then
+            log_error "\n\033[31m❌ Claude command failed\033[0m"
+            log_error "This could be due to:"
+            log_error "  - Missing docs/PLAN.md file"
+            log_error "  - Docker container not running"
+            log_error "  - Network issues"
+            log_error ""
+            log_error "Check the log file for details: $LOGFILE-planner"
+            exit 1
+        fi
+    else
+        # Silent mode - just save to log
+        echo "Running Claude to analyze PLAN.md (this may take 10-30 seconds)..."
+        echo "Using command: $(get_actual_claude_cmd)"
+        echo "Plan file: $PLAN_FILE"
+        
+        # Debug: Show the actual command being run
+        if [ "${DEBUG:-false}" = "true" ]; then
+            echo "DEBUG: Full command: $(get_actual_claude_cmd) --dangerously-skip-permissions -p \"...\""
+            echo "DEBUG: Log file: $LOGFILE-planner"
+        fi
+        
+        # Temporarily disable error trap for this command
+        set +e
+        
+        # Create temp file for planning prompt
+        plan_prompt_file="$TMPDIR/plan-prompt-silent-$$-$(date +%s).txt"
+        cat > "$plan_prompt_file" <<PLAN_PROMPT_END
+$ULTRATHINK_MODE
+Read $(get_workspace_path "$PLAN_FILE") in order and tell me what's the first open task that needs to be 
+done by the developer. Include any context that relates to it , such as sub-bullet 
+points or the section the todo item lives in. 
+Also bring in any related context from any BRIEF.md, QUESTIONS.md and REQUIREMENTS.md files you can find.
+Really think this through, as
+the developer will need not just to have blinders on when doing a dev task, but
+also sometimes will need to think about the bigger picture. Particularly if it's
+been stuck in the weeds making a ton of changes when sometimes a single fix
+can clear out a thousand errors. Please consider what are the lowest risk changes
+that achieve the task goal, since you knoow the full plan and the developer
+doesn't necessarily see it.
+
+If the plan is complete, say <ALL DONE>.
+PLAN_PROMPT_END
+        
+        # Use the new function that handles prompt files properly
+        execute_claude_with_retry_from_file "$LOGFILE-planner" "$(get_actual_claude_cmd)" "$plan_prompt_file" 2>"$LOGFILE-planner.err"
+        CLAUDE_EXIT_CODE=$?
+        rm -f "$plan_prompt_file"
+        
+        # Check if Claude command failed
+        if [ $CLAUDE_EXIT_CODE -ne 0 ]; then
+            log_error "\n\033[31m❌ Claude command failed with exit code: $CLAUDE_EXIT_CODE\033[0m"
+            log_error "Command was: $CLAUDE_CMD"
+            log_error "Plan file: $PLAN_FILE"
+            
+            # Show last few lines of log file if it exists
+            if [ -f "$LOGFILE-planner" ] && [ -s "$LOGFILE-planner" ]; then
+                log_error ""
+                log_error "Last lines from log file:"
+                tail -10 "$LOGFILE-planner" | while IFS= read -r line; do
+                    log_error "  > $line"
+                done
+            else
+                log_error "Log file is empty or missing: $LOGFILE-planner"
+            fi
+            
+            # Try to get stderr output
+            if [ -f "$LOGFILE-planner.err" ]; then
+                log_error ""
+                log_error "Error output:"
+                cat "$LOGFILE-planner.err" | while IFS= read -r line; do
+                    log_error "  > $line"
+                done
+            fi
+            
+            log_error ""
+            log_error "Possible causes:"
+            log_error "  - Docker container not running (check: docker ps)"
+            log_error "  - File permissions issue"
+            log_error "  - Network/connectivity issues"
+            log_error "  - Invalid Claude configuration"
+            log_error ""
+            log_error "Full log file: $LOGFILE-planner"
+            exit 1
+        fi
+        set -e  # Re-enable error trap
+        
+        # Skip permissions check since we're already using --dangerously-skip-permissions
+    fi
+
+    log_progress "\033[32m✓ Planning phase completed in $(get_elapsed_time $PHASE_START)\033[0m"
+
+    set +e
+    if grep -q "<ALL DONE>" $LOGFILE-planner; then
+        log_info "\033[32mNo more tasks to do\033[0m"
+        exit 0
+    fi
+
+    # Wait a moment for file to be written
+    sleep 1
+    
+    nexttask=$(cat $LOGFILE-planner | grep -v "<ALL DONE>" | head -20)
+    set -e
+    
+    # Check if we got a valid task
+    if [ -z "$nexttask" ]; then
+        log_error "\n\033[31m❌ No task found in planner output\033[0m"
+        log_error "This could mean:"
+        log_error "  - The PLAN.md file is empty or improperly formatted"
+        log_error "  - Claude couldn't read the files"
+        log_error ""
+        log_error "Check the log file: $LOGFILE-planner"
+        exit 1
+    fi
+
+    # TODO: Task decomposition feature temporarily disabled due to command escaping issues
+    # Will be re-enabled after fixing the command construction
+    log_info "\033[32m==================================================================\033[0m"
+    log_info "\033[32m== RUNNING DEVELOPER TASK\033[0m"
+    log_info "\033[32m==================================================================\033[0m"
+    CURRENT_PHASE="Development"
+    
+    # Debug: Show task
+    if [ "$VERBOSE" = "true" ]; then
+        log_verbose "Task to complete:"
+        echo "$nexttask" | head -5 | while IFS= read -r line; do
+            log_verbose "  > $line"
+        done
+        log_verbose ""
+    fi
+    log_progress "\033[33m🔨 Working on: $(echo "$nexttask" | head -n1 | cut -c1-60)...\033[0m"
+    
+    # Reset timer for developer phase
+    PHASE_START=$(date +%s)
+
+    # run the task
+    if [ "$VERBOSE" = "true" ] || [ "$SHOW_PROGRESS" = "true" ]; then
+        log_progress "\033[90m→ Claude is now working on the development task\033[0m"
+        log_verbose "\033[90m  (This typically takes 1-5 minutes depending on complexity)\033[0m"
+        log_verbose ""
+        
+        # Show Claude's output in real-time
+        # Create a temporary file for the prompt to avoid shell escaping issues
+        # Use project-local temp directory to avoid conflicts between projects
+        prompt_file="$TMPDIR/claude-prompt-$$-$(date +%s).txt"
+        cat > "$prompt_file" <<PROMPT_END
+$ULTRATHINK_MODE
+You are an AI developer working within an automated development environment. Your role is 
+to complete tasks, plan implementations, and maintain high-quality code. Here is the 
+specific task you need to complete:
+
+<next_task>
+$nexttask
+</next_task>
+
+Before you begin working on this task, please follow these steps:
+
+1. Analyze the task with full ultrathinking and plan your approach. 
+Wrap your analysis in <task_analysis> tags inside your thinking block:
+   <task_analysis>
+   - Break down the task into clear, actionable steps
+   - For each step:
+     - Identify potential challenges
+     - Propose solutions for each challenge
+     - Consider architectural implications
+   - Ensure your plan adheres to clean code principles
+   - Consider how your changes will affect the overall system
+   - Verify that your approach uses defensive programming techniques
+   - Double-check that you're not implementing any 'cheats' (e.g., unnecessary fallbacks, ignoring issues, or marking tests to be ignored)
+   - Consider potential edge cases and how to handle them
+   - Think about testing strategies for your changes
+   - Evaluate the impact on system performance and scalability
+   </task_analysis>
+
+2. Execute the necessary changes or Bash commands to complete the task. 
+Wrap your code or commands in <execution> tags.
+
+3. If a linter is defined for this project, run it after your work. 
+Include the linter output in <linter_output> tags if applicable.
+
+4. Describe the changes you've made:
+   <changes>
+   - Provide a clear, concise summary of the implemented changes
+   - Explain any architectural decisions you made
+   - Highlight any potential areas of concern or future considerations
+   - Confirm that your implementation uses defensive programming techniques
+   - Verify that all failure modes throw exceptions rather than using silent warnings or fallbacks
+   - Describe how you've addressed potential edge cases
+   - Outline the testing strategy implemented for these changes
+   </changes>
+
+5. If you have any questions for future reference, add them to the QUESTIONS.md file. Wrap these additions in <questions_update> tags.
+
+6. If you have any ideas for future improvements or features, add them to the IDEAS.md file. Wrap these additions in <ideas_update> tags.
+
+Important guidelines to follow:
+- Prioritize simplicity in your code and project structure
+- Always use git for version control; do not create backup copies
+- Delete unused code and options
+- Maintain clean directory structures and consistent file placement
+- Be brutally honest about potential issues or disagreements with the given task
+- Throw exceptions for errors instead of adding fallbacks; errors should be visible and fixable
+- Focus on creating a bulletproof system
+- Create unit and integration tests whenever possible, focusing on real system interactions
+- Maintain web tests in a WEBTESTS.md file if applicable
+- Add lint/architecture/static code analysis tests as you go
+- Run cheap and easy tests (lint, architecture, unit) frequently during development
+
+Remember, your work will be reviewed before being committed to the repository. Ensure your changes are well-documented and adhere to the project's standards and best practices.
+
+Your final output should consist of the following sections in this order:
+1. <execution>
+2. <linter_output> (if applicable)
+3. <changes>
+4. <questions_update> summarizing the questions you added to QUESTIONS.md
+5. <ideas_update> summarizing the ideas you added to IDEAS.md
+
+Do not include any additional commentary or explanations outside of these tagged sections. Your final output should not duplicate or rehash any of the work you did in the task analysis section.
+PROMPT_END
+        
+        # Execute Claude with the prompt file using the safer approach
+        output=$(execute_claude_with_retry_from_file "$LOGFILE-developer" "$(get_actual_claude_cmd)" "$prompt_file")
+        cmd_exit_code=$?
+        
+        # Clean up the prompt file
+        rm -f "$prompt_file"
+        
+        check_permissions_error "$output" $cmd_exit_code
+    else
+        # Silent mode - just save to log
+        # Create temp file for developer prompt
+        dev_prompt_file="$TMPDIR/dev-prompt-$$-$(date +%s).txt"
+        cat > "$dev_prompt_file" <<'DEV_PROMPT_END'
+$ULTRATHINK_MODE
+You are an AI developer working within an automated development environment. Your role is 
+to complete tasks, plan implementations, and maintain high-quality code. Here is the 
+specific task you need to complete:
+
+<next_task>
+$nexttask
+</next_task>
+
+Before you begin working on this task, please follow these steps:
+
+1. Analyze the task with full ultrathinking and plan your approach. 
+Wrap your analysis in <task_analysis> tags inside your thinking block:
+   <task_analysis>
+   - Break down the task into clear, actionable steps
+   - For each step:
+     - Identify potential challenges
+     - Propose solutions for each challenge
+     - Consider architectural implications
+   - Ensure your plan adheres to clean code principles
+   - Consider how your changes will affect the overall system
+   - Verify that your approach uses defensive programming techniques
+   - Double-check that you're not implementing any 'cheats' (e.g., unnecessary fallbacks, ignoring issues, or marking tests to be ignored)
+   - Consider potential edge cases and how to handle them
+   - Think about testing strategies for your changes
+   - Evaluate the impact on system performance and scalability
+   </task_analysis>
+
+2. Execute the necessary changes or Bash commands to complete the task. 
+Wrap your code or commands in <execution> tags.
+
+3. If a linter is defined for this project, run it after your work. 
+Include the linter output in <linter_output> tags if applicable.
+
+4. Describe the changes you've made:
+   <changes>
+   - Provide a clear, concise summary of the implemented changes
+   - Explain any architectural decisions you made
+   - Highlight any potential areas of concern or future considerations
+   - Confirm that your implementation uses defensive programming techniques
+   - Verify that all failure modes throw exceptions rather than using silent warnings or fallbacks
+   - Describe how you've addressed potential edge cases
+   - Outline the testing strategy implemented for these changes
+   </changes>
+
+5. If you have any questions for future reference, add them to the QUESTIONS.md file. Wrap these additions in <questions_update> tags.
+
+6. If you have any ideas for future improvements or features, add them to the IDEAS.md file. Wrap these additions in <ideas_update> tags.
+
+Important guidelines to follow:
+- Prioritize simplicity in your code and project structure
+- Always use git for version control; do not create backup copies
+- Delete unused code and options
+- Maintain clean directory structures and consistent file placement
+- Be brutally honest about potential issues or disagreements with the given task
+- Throw exceptions for errors instead of adding fallbacks; errors should be visible and fixable
+- Focus on creating a bulletproof system
+- Create unit and integration tests whenever possible, focusing on real system interactions
+- Maintain web tests in a WEBTESTS.md file if applicable
+- Add lint/architecture/static code analysis tests as you go
+- Run cheap and easy tests (lint, architecture, unit) frequently during development
+
+Remember, your work will be reviewed before being committed to the repository. Ensure your changes are well-documented and adhere to the project's standards and best practices.
+
+Your final output should consist of the following sections in this order:
+1. <execution>
+2. <linter_output> (if applicable)
+3. <changes>
+4. <questions_update> summarizing the questions you added to QUESTIONS.md
+5. <ideas_update> summarizing the ideas you added to IDEAS.md
+
+Do not include any additional commentary or explanations outside of these tagged sections. Your final output should not duplicate or rehash any of the work you did in the task analysis section.
+DEV_PROMPT_END
+        
+        output=$(execute_claude_with_retry_from_file "$LOGFILE-developer" "$(get_actual_claude_cmd)" "$dev_prompt_file" 2>&1)
+        cmd_exit_code=$?
+        rm -f "$dev_prompt_file"
+        check_permissions_error "$output" $cmd_exit_code
+    fi
+
+    log_progress "\033[32m✓ Developer phase completed in $(get_elapsed_time $PHASE_START)\033[0m"
+
+    log_info "\033[32m==================================================================\033[0m"
+    log_info "\033[32m== REVIEWING WORK (backgrounded)\033[0m"
+    log_info "\033[32m==================================================================\033[0m"
+    
+    # Reset timer for review phase
+    PHASE_START=$(date +%s)
+
+    # run the static code reviewer using Claude Code with ultrathink (replaces codex o3)
+    # run it in the background because it's thorough
+    log_info "Starting static code review (running in background)..."
+    (set +e  # Disable error trap for background process
+    
+    # Create temp file for static review prompt
+    static_review_prompt="$TMPDIR/static-review-$$-$(date +%s).txt"
+    cat > "$static_review_prompt" <<STATIC_REVIEW_END
+<ultrathink>
+Make sure you think deeply about this code review.
+</ultrathink>
+
+You are the team's static code reviewer.
+A developer has completed this task: $nexttask
+The developer's notes are at $LOGFILE-developer .
+
+Related docs:
+- BRIEF.md
+- docs/PLAN.md
+- docs/QUESTIONS.md
+- docs/REQUIREMENTS.md
+- README.md
+
+Please review the task and make sure it's complete, and done to satisfaction.
+DO NOT trust the developer's notes, always review the code and build/test results yourself.
+Look for typical 'cheating' patterns, such as turning off unit tests, taking files
+out of the compilation configuration, and redefining the plan to skip tasks
+that aren't working.
+
+If the task is not complete, adjust the item in docs/PLAN.md with suggestions for 
+the developer to complete the task properly.
+
+If you have any questions of the user for the future, you can add them to QUESTIONS.md.
+If you have any ideas for the future, you can add them to IDEAS.md.
+STATIC_REVIEW_END
+    
+    output=$(execute_claude_with_retry_from_file "$LOGFILE-reviewer" "$(get_actual_claude_cmd)" "$static_review_prompt" 2>&1)
+    cmd_exit_code=$?
+    rm -f "$static_review_prompt"
+    check_permissions_error "$output" $cmd_exit_code) &
+
+    log_info "\033[32m==================================================================\033[0m"
+    log_info "\033[32m== REVIEWING/TESTING/COMMITTING WORK\033[0m"
+    log_info "\033[32m==================================================================\033[0m"
+
+    # run the reviewer/tester
+    set +e  # Temporarily disable error trap for debugging
+    
+    # Create a temporary file for the review prompt to avoid escaping issues
+    review_prompt_file="$TMPDIR/review-prompt-$$-$(date +%s).txt"
+    cat > "$review_prompt_file" <<REVIEW_END
+<ultrathink>
+You are the team's architect and reviewer. Think deeply about the quality and completeness of this work.
+</ultrathink>
+
+A developer has completed this task: $nexttask
+
+The developer's notes are at $LOGFILE-developer .
+The static code reviewer reviewed the code and its (possibly partial) result is at $LOGFILE-reviewer .
+
+Related docs:
+- BRIEF.md
+- docs/PLAN.md
+- docs/QUESTIONS.md
+- docs/REQUIREMENTS.md
+- README.md
+
+Please review the task and uncommitted changes, and make sure the task is complete, and done to satisfaction.
+DO NOT trust the developer's notes, always review the code and build/test results yourself.
+Look for typical 'cheating' patterns, such as turning off unit tests, taking files
+out of the compilation configuration, and redefining the plan to skip tasks
+that aren't working.
+If there's a linter defined for this project, run it.
+
+If the task is not complete, adjust the item in docs/PLAN.md with suggestions for 
+the developer to complete the task properly.
+
+If the task is complete and we're happy with the code, run a git commit+push.
+
+If you have any questions of the user for the future, you can add them to QUESTIONS.md.
+If you have any ideas for the future, you can add them to IDEAS.md.
+REVIEW_END
+
+    # Execute using the file-based approach for proper handling
+    if [ "$VERBOSE" = "true" ] || [ "$SHOW_PROGRESS" = "true" ]; then
+        time output=$(execute_claude_with_retry_from_file "$LOGFILE-tester" "$(get_actual_claude_cmd)" "$review_prompt_file")
+        cmd_exit_code=$?
+    else
+        output=$(execute_claude_with_retry_from_file "$LOGFILE-tester" "$(get_actual_claude_cmd)" "$review_prompt_file" 2>&1)
+        cmd_exit_code=$?
+    fi
+    rm -f "$review_prompt_file"
+    
+    # Check for errors but don't exit on failure - log and continue
+    if [ $cmd_exit_code -ne 0 ]; then
+        log_error "\n\033[33m⚠️  Review phase encountered an error (exit code: $cmd_exit_code)\033[0m"
+        log_error "Continuing with next iteration..."
+        # Don't exit - let the loop continue
+    else
+        check_permissions_error "$output" $cmd_exit_code
+    fi
+    
+    set -e  # Re-enable error trap
+
+    log_progress "\033[32m✓ Review/test phase completed in $(get_elapsed_time $PHASE_START)\033[0m"
+    log_progress "\033[32m✅ Iteration $LOOP_COUNTER complete\033[0m"
+    log_progress ""
+
+    sleep 1
+done
+
+

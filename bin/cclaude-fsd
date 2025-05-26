@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# Alias for cclaudefsd - makes the command match the package name
+exec cclaudefsd "$@"

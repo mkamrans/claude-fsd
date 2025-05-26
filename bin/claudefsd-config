@@ -1,0 +1,180 @@
+#!/bin/bash
+
+set -e
+
+# Source the retry logic
+# Get the directory where this script really lives (following symlinks)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ $SCRIPT_PATH != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+# Source the retry logic
+if [ -f "$SCRIPT_DIR/claude-retry-common.sh" ]; then
+    source "$SCRIPT_DIR/claude-retry-common.sh"
+else
+    echo "Warning: Could not find claude-retry-common.sh in $SCRIPT_DIR" >&2
+    # Define no-op functions to prevent errors
+    execute_claude_with_retry() { "$@"; }
+    execute_claude_with_retry_and_log() { eval "$1" 2>&1 | tee "$2"; }
+    claude_with_retry() { "$@"; }
+fi
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Configuration file location
+CONFIG_DIR="$HOME/.config/oclaudefsd"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# Function to ensure config directory exists
+ensure_config_dir() {
+    mkdir -p "$CONFIG_DIR"
+}
+
+# Function to load configuration
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Function to save configuration
+save_config() {
+    ensure_config_dir
+    cat > "$CONFIG_FILE" << EOF
+# oclaudefsd configuration
+# Generated on $(date)
+
+# Claude command configuration
+CLAUDE_CMD="$CLAUDE_CMD"
+CLAUDE_TYPE="$CLAUDE_TYPE"
+DOCKER_CONTAINER="$DOCKER_CONTAINER"
+EOF
+    echo -e "${GREEN}✓ Configuration saved to $CONFIG_FILE${NC}"
+}
+
+# Function to run setup wizard
+run_setup() {
+    echo -e "${BLUE}🤖 oclaudefsd Configuration Setup${NC}"
+    echo
+    echo "Let's configure how to run Claude on your system."
+    echo
+    echo -e "${YELLOW}⚠️  Security Recommendation:${NC}"
+    echo "We strongly recommend using a containerized version of Claude for security."
+    echo "Learn more: https://docs.anthropic.com/en/docs/claude-code/security"
+    echo
+    
+    # Ask about Claude installation type
+    echo "How is Claude installed on your system?"
+    echo "  1) Standard installation (claude command)"
+    echo "  2) Docker container (recommended for security)"
+    echo "  3) Custom command"
+    echo
+    read -p "Select an option [1]: " claude_type_choice
+    claude_type_choice=${claude_type_choice:-1}
+    
+    case $claude_type_choice in
+        1)
+            CLAUDE_TYPE="standard"
+            CLAUDE_CMD="claude"
+            echo -e "${GREEN}✓ Using standard Claude installation${NC}"
+            ;;
+        2)
+            CLAUDE_TYPE="docker"
+            echo
+            read -p "Enter your Docker container name: " container_name
+            if [ -z "$container_name" ]; then
+                echo -e "${RED}❌ Container name cannot be empty${NC}"
+                exit 1
+            fi
+            DOCKER_CONTAINER="$container_name"
+            CLAUDE_CMD="docker exec $DOCKER_CONTAINER claude"
+            echo -e "${GREEN}✓ Using Docker container: $DOCKER_CONTAINER${NC}"
+            ;;
+        3)
+            CLAUDE_TYPE="custom"
+            echo
+            read -p "Enter the full command to run Claude: " custom_cmd
+            if [ -z "$custom_cmd" ]; then
+                echo -e "${RED}❌ Command cannot be empty${NC}"
+                exit 1
+            fi
+            CLAUDE_CMD="$custom_cmd"
+            echo -e "${GREEN}✓ Using custom command: $CLAUDE_CMD${NC}"
+            ;;
+        *)
+            echo -e "${RED}❌ Invalid option${NC}"
+            exit 1
+            ;;
+    esac
+    
+    # Test the command
+    echo
+    echo -e "${YELLOW}Testing Claude command...${NC}"
+    if output=$(claude_with_retry "$CLAUDE_CMD" --version 2>&1); then
+        echo -e "${GREEN}✓ Claude command works!${NC}"
+    else
+        echo -e "${RED}❌ Claude command failed. Please check your configuration.${NC}"
+        echo "Command tested: $CLAUDE_CMD --version"
+        
+        if [ "$CLAUDE_TYPE" = "docker" ]; then
+            echo ""
+            echo -e "${YELLOW}For Docker containers, you may need to accept permissions first:${NC}"
+            echo -e "${BLUE}docker exec -it $DOCKER_CONTAINER claude --dangerously-skip-permissions${NC}"
+            echo ""
+        fi
+        
+        read -p "Do you want to save this configuration anyway? [y/N]: " save_anyway
+        if [[ ! "$save_anyway" =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+    
+    # Save configuration
+    save_config
+    
+    echo
+    echo -e "${GREEN}Setup complete!${NC} You can now use oclaudefsd."
+    echo
+    echo "To reconfigure later, run:"
+    echo -e "${BLUE}oclaudefsd config${NC}"
+}
+
+# Function to show current configuration
+show_config() {
+    load_config
+    echo -e "${BLUE}Current Configuration:${NC}"
+    echo "  Claude Type: ${CLAUDE_TYPE:-not set}"
+    echo "  Claude Command: ${CLAUDE_CMD:-not set}"
+    if [ "$CLAUDE_TYPE" = "docker" ]; then
+        echo "  Docker Container: ${DOCKER_CONTAINER:-not set}"
+    fi
+    echo
+    echo "Configuration file: $CONFIG_FILE"
+}
+
+# Main logic
+case "${1:-setup}" in
+    setup)
+        run_setup
+        ;;
+    show)
+        show_config
+        ;;
+    reset)
+        rm -f "$CONFIG_FILE"
+        echo -e "${GREEN}✓ Configuration reset${NC}"
+        ;;
+    *)
+        echo "Usage: $0 [setup|show|reset]"
+        exit 1
+        ;;
+esac

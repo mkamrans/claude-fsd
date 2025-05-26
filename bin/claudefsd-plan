@@ -1,0 +1,160 @@
+#!/bin/bash
+
+set -e
+
+# Source the retry logic
+# Get the directory where this script really lives (following symlinks)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ $SCRIPT_PATH != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+# Source the retry logic
+if [ -f "$SCRIPT_DIR/claude-retry-common.sh" ]; then
+    source "$SCRIPT_DIR/claude-retry-common.sh"
+else
+    echo "Warning: Could not find claude-retry-common.sh in $SCRIPT_DIR" >&2
+    # Define no-op functions to prevent errors
+    execute_claude_with_retry() { "$@"; }
+    execute_claude_with_retry_and_log() { eval "$1" 2>&1 | tee "$2"; }
+    claude_with_retry() { "$@"; }
+fi
+
+# Get Claude command (use CLAUDE_CMD if set, otherwise default to 'claude')
+CLAUDE_CMD="${CLAUDE_CMD:-claude}"
+
+# Check dependencies
+# Check if running from npm global install or local development
+if command -v oclaudefsd-check-dependencies &> /dev/null; then
+    # Global npm install - use the prefixed command
+    oclaudefsd-check-dependencies
+else
+    # Local development - use absolute path
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "$SCRIPT_DIR/claudefsd-check-dependencies"
+fi
+
+# Check if Claude permissions have been accepted
+if ! $CLAUDE_CMD --dangerously-skip-permissions --help >/dev/null 2>&1; then
+    echo -e "\033[33m==================================================================\033[0m"
+    echo -e "\033[33m== PERMISSION ACCEPTANCE REQUIRED\033[0m"
+    echo -e "\033[33m==================================================================\033[0m"
+    echo
+    echo "Claude requires you to accept the --dangerously-skip-permissions flag"
+    echo "in an interactive session before it can be used in automated scripts."
+    echo
+    echo "Please run the following command once to accept permissions:"
+    echo -e "\033[32m$CLAUDE_CMD --dangerously-skip-permissions\033[0m"
+    echo
+    echo "After accepting, you can run this script again."
+    exit 1
+fi
+
+mkdir -p logs
+
+# Use a temporary directory for tmp files, as codex is sandboxed to this directory
+mkdir -p tmp
+export TMPDIR=tmp/
+
+# Function to find file case-insensitively
+find_file_ci() {
+    local filename="$1"
+    find . -maxdepth 1 -iname "$filename" -type f 2>/dev/null | head -1
+}
+
+# look for a brief file
+BRIEF_FILE=$(find_file_ci "brief.md")
+if [ -z "$BRIEF_FILE" ]; then
+    echo -e "\033[31m❌ Missing required file: BRIEF.md (or brief.md)\033[0m"
+    echo
+    echo "The planning mode requires a project brief to work from."
+    echo "Please create BRIEF.md with your project description."
+    echo
+    echo "Example BRIEF.md:"
+    echo "# Project Brief"
+    echo
+    echo "## Overview"
+    echo "A brief description of what you want to build."
+    echo
+    echo "## Goals"
+    echo "- Goal 1: What you want to achieve"
+    echo "- Goal 2: Another objective"
+    echo
+    echo "## Requirements"
+    echo "- Feature 1: Description"
+    echo "- Feature 2: Description"
+    echo
+    exit 1
+fi
+
+echo "Found brief file: $BRIEF_FILE"
+
+if [ "$EDITOR" == "" ]; then
+    EDITOR="nano"
+fi
+
+LOGFILE="logs/claude-$(date +%Y%m%d_%H%M%S).txt"
+
+echo -e "\033[32m==================================================================\033[0m"
+echo -e "\033[32m== ANALYZING PROJECT BRIEF\033[0m"
+echo -e "\033[32m==================================================================\033[0m"
+
+prompt1="
+Read all of these documents if they exist:
+- BRIEF.md -- the project brief
+- docs/REQUIREMENTS.md -- the project requirements
+- docs/PLAN.md -- the project plan
+- docs/QUESTIONS.md -- the project questions
+- docs/IDEAS.md -- the backlog of future ideas
+- docs/WEBTESTS.md -- the project web tests
+- README.md -- the project README
+
+Your job, as a megathinking business analyst, project manager, architect and product manager, is to help solidify
+the requirements and plan. 
+
+1. Read through all of these documents and follow any references on the web to read more background.
+2. Add 10 relevant questions to docs/QUESTIONS.md to expand on the brief and requirements.
+3. Create the document docs/QUESTIONS.md if it doesn't exist.
+
+Try to think of typical assumptions an AI or developer would make, and add questions to address them directly.
+
+As part of this work, please consider our SDLC and what infrastructure will need to be established to ensure
+the system is compliant. Make sure the basics like a git repo and a pre-commit hook that call a custom
+linter are in the plan to be established if they don't exist now. 
+Also make sure our work is being done on a feature branch.
+Other than that, DO NOT get distracted by infrastructure, stick with the YAGNI principle.
+Just ensure the basic branching and linter is working and move on.
+Focus on the user's brief and answers from docs/QUESTIONS.md, and the plan.
+"
+
+# run BA's
+echo "Running claude..."
+execute_claude_with_retry_and_log "$CLAUDE_CMD --dangerously-skip-permissions -p \"$prompt1\"" "$LOGFILE-ba1"
+
+echo "Running claude with ultrathink (results won't display)..."
+execute_claude_with_retry "$CLAUDE_CMD --dangerously-skip-permissions -p \"Make sure you ultrathink about this
+
+$prompt1\"" > $LOGFILE-ba2
+
+echo -e "\033[32m==================================================================\033[0m"
+echo -e "\033[32m== ANSWER THE QUESTIONS IN QUESTIONS.md\033[0m"
+echo -e "\033[32m==================================================================\033[0m"
+
+echo "Press enter to continue..."
+read -n 1 -s
+
+echo "Opening QUESTIONS.md in $EDITOR..."
+$EDITOR QUESTIONS.md
+
+# Check if running from npm global install or local development
+if command -v oclaudefsd-plan-gen &> /dev/null; then
+    # Global npm install - use the prefixed command
+    oclaudefsd-plan-gen
+else
+    # Local development - use absolute path
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "$SCRIPT_DIR/claudefsd-plan-gen"
+fi

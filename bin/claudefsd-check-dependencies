@@ -1,0 +1,133 @@
+#!/bin/bash
+
+# Don't use set -e here so we can handle errors gracefully
+# set +e
+
+# Source the retry logic
+# Get the directory where this script really lives (following symlinks)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ $SCRIPT_PATH != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+# Source the retry logic
+if [ -f "$SCRIPT_DIR/claude-retry-common.sh" ]; then
+    source "$SCRIPT_DIR/claude-retry-common.sh"
+else
+    echo "Warning: Could not find claude-retry-common.sh in $SCRIPT_DIR" >&2
+    # Define no-op functions to prevent errors
+    execute_claude_with_retry() { "$@"; }
+    execute_claude_with_retry_and_log() { eval "$1" 2>&1 | tee "$2"; }
+    claude_with_retry() { "$@"; }
+fi
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to check dependencies
+check_dependencies() {
+    local check_claude=${1:-true}  # Check claude by default
+    local missing_deps=()
+    local warnings=()
+    
+    # Use CLAUDE_CMD if set, otherwise default to 'claude'
+    local claude_cmd="${CLAUDE_CMD:-claude}"
+    
+    # Debug output
+    if [ "${DEBUG:-false}" = "true" ]; then
+        echo "DEBUG: Checking for command: $claude_cmd"
+        echo "DEBUG: CLAUDE_TYPE: ${CLAUDE_TYPE:-not set}"
+    fi
+    
+    # Check for claude command based on type
+    if [ "${CLAUDE_TYPE}" = "docker" ]; then
+        # For Docker, we'll check if the configured container works
+        # Dynamic resolution happens later in the actual scripts
+        local container_to_check="${DOCKER_CONTAINER}"
+        
+        # Validate container name - it should not contain "Usage:" or newlines
+        if [[ "$container_to_check" == *"Usage:"* ]] || [[ "$container_to_check" == *$'\n'* ]]; then
+            missing_deps+=("Valid Docker container configuration (current value appears to be an error message)")
+            if [ "${DEBUG:-false}" = "true" ]; then
+                echo "DEBUG: Invalid DOCKER_CONTAINER value: $container_to_check" >&2
+            fi
+        elif [ -z "$container_to_check" ]; then
+            missing_deps+=("Docker container name (not configured)")
+        # First check if Docker is running
+        elif ! docker info >/dev/null 2>&1; then
+            missing_deps+=("Docker daemon (not running)")
+        else
+            # Check if the container exists and is running
+            if docker ps --format "table {{.Names}}" | grep -q "^${container_to_check}$"; then
+                # Container is running, check if Claude works
+                local test_cmd="docker exec $container_to_check claude"
+                if ! output=$($test_cmd --version 2>&1); then
+                    missing_deps+=("Claude command in Docker container '${container_to_check}'")
+                fi
+            else
+                # Container not running, but might exist - check all containers
+                if docker ps -a --format "table {{.Names}}" | grep -q "^${container_to_check}$"; then
+                    missing_deps+=("Docker container '${container_to_check}' (exists but not running)")
+                else
+                    # Container doesn't exist at all
+                    # This is OK - dynamic resolution will handle it later
+                    # Only warn if we're in verbose mode
+                    if [ "${VERBOSE:-false}" = "true" ] || [ "${DEBUG:-false}" = "true" ]; then
+                        warnings+=("Configured container '${container_to_check}' not found - will attempt dynamic resolution")
+                    fi
+                fi
+            fi
+        fi
+    else
+        # For standard commands, check if command exists
+        local base_cmd=$(echo "$claude_cmd" | awk '{print $1}')
+        if ! command_exists "$base_cmd"; then
+            missing_deps+=("$claude_cmd")
+        fi
+    fi
+    
+    # All AI processing now uses Claude Code with ultrathink - no additional dependencies needed
+    
+    # Show critical errors
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        echo -e "${RED}❌ Missing required dependencies:${NC}"
+        for dep in "${missing_deps[@]}"; do
+            echo -e "  - $dep"
+            if [[ "$dep" == *"claude"* ]]; then
+                echo -e "    Install from: https://docs.anthropic.com/en/docs/claude-code"
+                echo -e "    Or specify a different command with --claude-cmd=<cmd>"
+            fi
+            if [[ "$dep" == *"Valid Docker container"* ]]; then
+                echo -e "    Your Docker container configuration appears corrupted."
+                echo -e "    Run: oclaudefsd config reset && oclaudefsd config"
+            fi
+        done
+        echo
+        exit 1
+    fi
+    
+    # Show warnings
+    if [ ${#warnings[@]} -ne 0 ]; then
+        echo -e "${YELLOW}⚠️  Optional dependencies:${NC}"
+        for warning in "${warnings[@]}"; do
+            echo -e "  - $warning"
+        done
+        echo
+    fi
+}
+
+# If sourced directly, run the check
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    check_dependencies "$@"
+fi
